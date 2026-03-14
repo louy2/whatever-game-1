@@ -440,7 +440,7 @@ class GameScene extends Phaser.Scene {
 
     // ---- Darkness overlay (RenderTexture approach) ----
     this.darkRT = this.add.renderTexture(0, 0, this.cameras.main.width, this.cameras.main.height)
-      .setDepth(15).setScrollFactor(0).setBlendMode(Phaser.BlendModes.MULTIPLY);
+      .setOrigin(0, 0).setDepth(15).setScrollFactor(0).setBlendMode(Phaser.BlendModes.MULTIPLY);
     this.lightImage = this.add.image(0, 0, 'light_mask').setVisible(false);
     this.lightRadius = 120;
 
