@@ -158,20 +158,16 @@ class GameScene extends Phaser.Scene {
             y = Phaser.Math.Between(margin, GAME_H - margin);
         } while (Phaser.Math.Distance.Between(x, y, this.player.x, this.player.y) < 200);
 
-        const ghost = this.add.circle(x, y, 18, 0x7744ff, 0.85);
+        // Invisible physics body for ghost
+        const ghost = this.add.circle(x, y, 20, 0x000000, 0);
         ghost.setDepth(8);
         this.physics.add.existing(ghost);
         ghost.body.setCollideWorldBounds(true);
         ghost.body.setBounce(1, 1);
 
-        // Ghost eyes
-        const eyeL = this.add.circle(-6, -6, 4, 0xffffff);
-        const eyeR = this.add.circle(6, -6, 4, 0xffffff);
-        const pupilL = this.add.circle(-6, -6, 2, 0x000000);
-        const pupilR = this.add.circle(6, -6, 2, 0x000000);
-        eyeL.setDepth(8); eyeR.setDepth(8);
-        pupilL.setDepth(8); pupilR.setDepth(8);
-        ghost.eyes = [eyeL, eyeR, pupilL, pupilR];
+        // Graphics object for custom drawing
+        ghost.gfx = this.add.graphics();
+        ghost.gfx.setDepth(8);
 
         ghost.hp = GHOST_MAX_HP;
         ghost.state = 'roaming'; // roaming, stunned, sucking, captured
@@ -180,12 +176,14 @@ class GameScene extends Phaser.Scene {
         ghost.changeTimer = Phaser.Math.Between(500, 2000);
         ghost.fleeAngle = 0;
         ghost.fleeChangeTimer = 0;
+        ghost.wobble = Math.random() * Math.PI * 2; // for floating animation
+        ghost.wispSeed = Math.random() * 1000; // unique wisp pattern
 
         // HP bar background
-        ghost.hpBarBg = this.add.rectangle(x, y - 28, 36, 6, 0x333333);
-        ghost.hpBarBg.setDepth(8);
-        ghost.hpBar = this.add.rectangle(x, y - 28, 34, 4, 0xff3333);
-        ghost.hpBar.setDepth(8);
+        ghost.hpBarBg = this.add.rectangle(x, y - 36, 40, 6, 0x333333);
+        ghost.hpBarBg.setDepth(9);
+        ghost.hpBar = this.add.rectangle(x, y - 36, 38, 4, 0xff3333);
+        ghost.hpBar.setDepth(9);
 
         this.ghosts.push(ghost);
     }
@@ -429,7 +427,6 @@ class GameScene extends Phaser.Scene {
 
             // ---- State Machine ----
             if (ghost.state === 'roaming') {
-                ghost.setFillStyle(0x7744ff, 0.85);
                 ghost.changeTimer -= delta;
                 if (ghost.changeTimer <= 0) {
                     ghost.moveAngle = Math.random() * Math.PI * 2;
@@ -466,7 +463,6 @@ class GameScene extends Phaser.Scene {
                 }
             }
             else if (ghost.state === 'stunned') {
-                ghost.setFillStyle(0xffff00, 1);
                 ghost.body.setVelocity(0, 0);
                 ghost.stunTimer -= delta;
 
@@ -483,7 +479,6 @@ class GameScene extends Phaser.Scene {
                 }
             }
             else if (ghost.state === 'sucking') {
-                ghost.setFillStyle(0xff8800, 1);
 
                 // Ghost tries to flee in random direction
                 ghost.fleeChangeTimer -= delta;
@@ -570,21 +565,14 @@ class GameScene extends Phaser.Scene {
                 }
             }
 
-            // Update ghost eye positions
-            if (ghost.eyes && ghost.state !== 'captured') {
-                const eyeOffX = Math.cos(this.playerAimAngle) * 2;
-                const eyeOffY = Math.sin(this.playerAimAngle) * 2;
-                ghost.eyes[0].setPosition(gx - 6, gy - 6);
-                ghost.eyes[1].setPosition(gx + 6, gy - 6);
-                ghost.eyes[2].setPosition(gx - 6 + eyeOffX, gy - 6 + eyeOffY);
-                ghost.eyes[3].setPosition(gx + 6 + eyeOffX, gy - 6 + eyeOffY);
-            }
+            // Draw ghost and update HP bar
+            if (ghost.state !== 'captured') {
+                ghost.wobble += delta * 0.003;
+                this.drawGhost(ghost, time);
 
-            // Update HP bar
-            if (ghost.hpBarBg && ghost.state !== 'captured') {
-                ghost.hpBarBg.setPosition(gx, gy - 28);
-                ghost.hpBar.setPosition(gx - 17 + (34 * (ghost.hp / GHOST_MAX_HP)) / 2, gy - 28);
-                ghost.hpBar.width = 34 * (ghost.hp / GHOST_MAX_HP);
+                ghost.hpBarBg.setPosition(gx, gy - 38);
+                ghost.hpBar.setPosition(gx - 19 + (38 * (ghost.hp / GHOST_MAX_HP)) / 2, gy - 38);
+                ghost.hpBar.width = 38 * (ghost.hp / GHOST_MAX_HP);
                 ghost.hpBarBg.setVisible(ghost.state === 'sucking' || ghost.hp < GHOST_MAX_HP);
                 ghost.hpBar.setVisible(ghost.state === 'sucking' || ghost.hp < GHOST_MAX_HP);
             }
@@ -717,11 +705,163 @@ class GameScene extends Phaser.Scene {
         g.strokePath();
     }
 
+    drawGhost(ghost, time) {
+        const g = ghost.gfx;
+        g.clear();
+        const cx = ghost.x;
+        const cy = ghost.y;
+        const isStunned = ghost.state === 'stunned';
+        const isSucking = ghost.state === 'sucking';
+        const bob = Math.sin(ghost.wobble) * 3; // floating bob
+
+        // Color palette based on state
+        let frameColor = 0x5a3030;
+        let glassColor = 0x6644aa;
+        let glassAlpha = 0.6;
+        let eyeColor = 0xccddff;
+        let wispColor = 0x7744cc;
+        let sandColor = 0x8866cc;
+        if (isStunned) {
+            frameColor = 0x8a8a30;
+            glassColor = 0xcccc44;
+            glassAlpha = 0.8;
+            eyeColor = 0xffffaa;
+            wispColor = 0xaaaa33;
+            sandColor = 0xdddd55;
+        } else if (isSucking) {
+            frameColor = 0x7a4020;
+            glassColor = 0xcc6622;
+            glassAlpha = 0.7;
+            eyeColor = 0xffccaa;
+            wispColor = 0xcc6633;
+            sandColor = 0xff8844;
+        }
+
+        const top = cy - 22 + bob;
+        const mid = cy + bob;
+        const bot = cy + 22 + bob;
+
+        // ---- Ghostly wisps (purple flames around the hourglass) ----
+        const wt = time * 0.003 + ghost.wispSeed;
+        for (let i = 0; i < 5; i++) {
+            const angle = (Math.PI * 2 * i) / 5 + wt;
+            const dist = 16 + Math.sin(wt * 1.5 + i * 2) * 6;
+            const wy = cy + bob - 5 + Math.sin(wt * 2 + i) * 12;
+            const wx = cx + Math.cos(angle) * dist;
+            const size = 3 + Math.sin(wt + i * 1.3) * 2;
+            g.fillStyle(wispColor, 0.3 + Math.sin(wt + i) * 0.15);
+            g.fillCircle(wx, wy, Math.max(1, size));
+        }
+        // Rising wisps on top
+        for (let i = 0; i < 3; i++) {
+            const phase = (time * 0.002 + ghost.wispSeed + i * 2.1) % 3;
+            const ry = top - phase * 8;
+            const rx = cx - 4 + Math.sin(wt + i * 3) * 6;
+            const rAlpha = Math.max(0, 0.4 - phase * 0.13);
+            g.fillStyle(wispColor, rAlpha);
+            g.fillCircle(rx, ry, 2.5 - phase * 0.5);
+        }
+
+        // ---- Hourglass Frame (wooden) ----
+        // Top cap
+        g.fillStyle(frameColor, 1);
+        g.fillRoundedRect(cx - 14, top - 3, 28, 6, 2);
+        // Bottom cap
+        g.fillRoundedRect(cx - 14, bot - 3, 28, 6, 2);
+        // Side bars (left & right)
+        g.lineStyle(3, frameColor, 1);
+        // Left bar - curved inward
+        g.beginPath();
+        g.moveTo(cx - 13, top + 2);
+        g.lineTo(cx - 5, mid);
+        g.lineTo(cx - 13, bot - 2);
+        g.strokePath();
+        // Right bar
+        g.beginPath();
+        g.moveTo(cx + 13, top + 2);
+        g.lineTo(cx + 5, mid);
+        g.lineTo(cx + 13, bot - 2);
+        g.strokePath();
+
+        // ---- Glass bulbs ----
+        // Upper bulb (triangle-ish shape)
+        g.fillStyle(glassColor, glassAlpha);
+        g.beginPath();
+        g.moveTo(cx - 11, top + 3);
+        g.lineTo(cx + 11, top + 3);
+        g.lineTo(cx + 3, mid - 1);
+        g.lineTo(cx - 3, mid - 1);
+        g.closePath();
+        g.fillPath();
+        // Lower bulb
+        g.beginPath();
+        g.moveTo(cx - 3, mid + 1);
+        g.lineTo(cx + 3, mid + 1);
+        g.lineTo(cx + 11, bot - 3);
+        g.lineTo(cx - 11, bot - 3);
+        g.closePath();
+        g.fillPath();
+
+        // ---- Sand particles in lower bulb ----
+        g.fillStyle(sandColor, 0.5);
+        const sandLevel = isSucking ? 0.3 : 0.7;
+        const sandTop = mid + 1 + (bot - 3 - mid - 1) * (1 - sandLevel);
+        const sandW = 3 + (bot - 3 - sandTop) / (bot - 3 - mid - 1) * 8;
+        g.fillRoundedRect(cx - sandW, sandTop, sandW * 2, bot - 3 - sandTop, 1);
+
+        // Falling sand stream (thin line at center)
+        if (!isStunned) {
+            g.lineStyle(1, sandColor, 0.6);
+            g.beginPath();
+            g.moveTo(cx, mid - 1);
+            g.lineTo(cx, mid + 4);
+            g.strokePath();
+        }
+
+        // ---- Evil face in upper bulb ----
+        // Eyes (angry, glowing)
+        const eyeY = top + 10 + bob * 0.2;
+        // Left eye - angular/evil
+        g.fillStyle(eyeColor, 0.95);
+        g.beginPath();
+        g.moveTo(cx - 8, eyeY - 1);
+        g.lineTo(cx - 4, eyeY - 3);
+        g.lineTo(cx - 3, eyeY + 1);
+        g.lineTo(cx - 7, eyeY + 2);
+        g.closePath();
+        g.fillPath();
+        // Right eye
+        g.beginPath();
+        g.moveTo(cx + 8, eyeY - 1);
+        g.lineTo(cx + 4, eyeY - 3);
+        g.lineTo(cx + 3, eyeY + 1);
+        g.lineTo(cx + 7, eyeY + 2);
+        g.closePath();
+        g.fillPath();
+
+        // Eye glow
+        g.fillStyle(eyeColor, 0.15);
+        g.fillCircle(cx - 5.5, eyeY, 5);
+        g.fillCircle(cx + 5.5, eyeY, 5);
+
+        // Sinister grin
+        const mouthY = eyeY + 7;
+        g.lineStyle(1.5, 0x111111, 0.8);
+        g.beginPath();
+        g.moveTo(cx - 6, mouthY);
+        g.lineTo(cx - 3, mouthY + 2);
+        g.lineTo(cx, mouthY + 1);
+        g.lineTo(cx + 3, mouthY + 2);
+        g.lineTo(cx + 6, mouthY);
+        g.strokePath();
+    }
+
     captureGhost(ghost, index) {
         ghost.state = 'captured';
         ghost.body.setVelocity(0, 0);
         ghost.setVisible(false);
-        ghost.eyes.forEach(e => e.setVisible(false));
+        ghost.gfx.clear();
+        ghost.gfx.setVisible(false);
         ghost.hpBarBg.setVisible(false);
         ghost.hpBar.setVisible(false);
         this.vacuumTarget = null;
