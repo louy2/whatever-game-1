@@ -1,0 +1,9 @@
+{
+  "name": "ghost-mansion",
+  "version": "1.0.0",
+  "description": "A Luigi's Mansion-style ghost hunting game built with Phaser 3",
+  "scripts": {
+    "start": "npx serve ."
+  },
+  "license": "CC0-1.0"
+}
