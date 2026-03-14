@@ -87,6 +87,24 @@ function createTextures(scene) {
   flg.generateTexture('flash_effect', 256, 256);
   flg.destroy();
 
+  // -- Light mask (radial gradient from transparent center to dark edges) --
+  const lightSize = 512;
+  const lightCanvas = document.createElement('canvas');
+  lightCanvas.width = lightSize;
+  lightCanvas.height = lightSize;
+  const lctx = lightCanvas.getContext('2d');
+  const gradient = lctx.createRadialGradient(
+    lightSize / 2, lightSize / 2, 0,
+    lightSize / 2, lightSize / 2, lightSize / 2
+  );
+  gradient.addColorStop(0, 'rgba(255,255,255,1)');
+  gradient.addColorStop(0.3, 'rgba(255,255,255,0.9)');
+  gradient.addColorStop(0.6, 'rgba(255,255,255,0.4)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0)');
+  lctx.fillStyle = gradient;
+  lctx.fillRect(0, 0, lightSize, lightSize);
+  scene.textures.addCanvas('light_mask', lightCanvas);
+
   // -- Hourglass Ghost (沙漏形幽灵) --
   createGhostTexture(scene, 'ghost', 0xaa44ff);
   createGhostTexture(scene, 'ghost_stunned', 0x8888ff);
@@ -391,6 +409,7 @@ class GameScene extends Phaser.Scene {
 
     // ---- Player ----
     this.player = this.physics.add.sprite(120, 500, 'player');
+    this.player.setDepth(3);
     this.player.setCollideWorldBounds(true);
     this.player.body.setSize(24, 44);
     this.player.body.setOffset(4, 4);
@@ -419,8 +438,10 @@ class GameScene extends Phaser.Scene {
     this.cameras.main.setBounds(0, 0, this.levelWidth, this.levelHeight);
     this.physics.world.setBounds(0, 0, this.levelWidth, this.levelHeight);
 
-    // ---- Darkness overlay ----
-    this.darknessOverlay = this.add.graphics().setDepth(15).setScrollFactor(0);
+    // ---- Darkness overlay (RenderTexture approach) ----
+    this.darkRT = this.add.renderTexture(0, 0, this.cameras.main.width, this.cameras.main.height)
+      .setDepth(15).setScrollFactor(0).setBlendMode(Phaser.BlendModes.MULTIPLY);
+    this.lightImage = this.add.image(0, 0, 'light_mask').setVisible(false);
     this.lightRadius = 120;
 
     // ---- Input ----
@@ -966,32 +987,30 @@ class GameScene extends Phaser.Scene {
 
   // ---- Darkness / Lighting ----
   updateDarkness() {
-    this.darknessOverlay.clear();
     const cam = this.cameras.main;
     const w = cam.width;
     const h = cam.height;
 
-    // Draw darkness with a hole for the light
-    this.darknessOverlay.fillStyle(0x000011, 0.7);
-    this.darknessOverlay.fillRect(0, 0, w, h);
+    // Fill with dark color
+    this.darkRT.fill(0x050510);
 
-    // Light circle around player (using blend mode trick - draw transparent circle)
+    // Player screen position
     const px = this.player.x - cam.scrollX;
     const py = this.player.y - cam.scrollY;
 
-    // Create gradient-like light by layering circles
-    const steps = 8;
-    for (let i = steps; i >= 0; i--) {
-      const r = this.lightRadius * (1 + i * 0.15);
-      const alpha = 0.7 * (i / steps);
-      this.darknessOverlay.fillStyle(0x000011, alpha);
-      this.darknessOverlay.fillCircle(px, py, r);
-    }
+    // Draw light mask centered on player using ERASE blend to punch a hole
+    const scale = (this.lightRadius / 256) * 1.8;
+    this.lightImage.setPosition(px, py).setScale(scale);
+    this.darkRT.erase(this.lightImage, px, py);
 
-    // Erase center (make fully visible)
-    // Use a compositing trick: overwrite with very low alpha
-    this.darknessOverlay.fillStyle(0x000011, 0.05);
-    this.darknessOverlay.fillCircle(px, py, this.lightRadius * 0.6);
+    // If using flashlight or vacuum, add directional light
+    if (this.vacuumBeam.visible || this.flashlightBeam.visible) {
+      const dir = this.facingRight ? 1 : -1;
+      const extraX = px + dir * this.lightRadius * 0.8;
+      this.lightImage.setScale(scale * 0.6);
+      this.darkRT.erase(this.lightImage, extraX, py);
+      this.lightImage.setScale(scale); // reset
+    }
   }
 
   // ---- Win / Lose ----
