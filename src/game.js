@@ -87,23 +87,30 @@ function createTextures(scene) {
   flg.generateTexture('flash_effect', 256, 256);
   flg.destroy();
 
-  // -- Light mask (radial gradient from transparent center to dark edges) --
-  const lightSize = 512;
-  const lightCanvas = document.createElement('canvas');
-  lightCanvas.width = lightSize;
-  lightCanvas.height = lightSize;
-  const lctx = lightCanvas.getContext('2d');
-  const gradient = lctx.createRadialGradient(
-    lightSize / 2, lightSize / 2, 0,
-    lightSize / 2, lightSize / 2, lightSize / 2
+  // -- Darkness mask: large black image with transparent radial hole in center --
+  const maskSize = 2048;
+  const lightR = 200; // base light radius in the texture
+  const darkCanvas = document.createElement('canvas');
+  darkCanvas.width = maskSize;
+  darkCanvas.height = maskSize;
+  const dctx = darkCanvas.getContext('2d');
+  // Fill entire canvas black
+  dctx.fillStyle = 'rgba(5,5,16,1)';
+  dctx.fillRect(0, 0, maskSize, maskSize);
+  // Punch a radial gradient hole in the center
+  dctx.globalCompositeOperation = 'destination-out';
+  const gradient = dctx.createRadialGradient(
+    maskSize / 2, maskSize / 2, 0,
+    maskSize / 2, maskSize / 2, lightR
   );
-  gradient.addColorStop(0, 'rgba(255,255,255,1)');
-  gradient.addColorStop(0.3, 'rgba(255,255,255,0.9)');
-  gradient.addColorStop(0.6, 'rgba(255,255,255,0.4)');
-  gradient.addColorStop(1, 'rgba(255,255,255,0)');
-  lctx.fillStyle = gradient;
-  lctx.fillRect(0, 0, lightSize, lightSize);
-  scene.textures.addCanvas('light_mask', lightCanvas);
+  gradient.addColorStop(0, 'rgba(0,0,0,1)');
+  gradient.addColorStop(0.5, 'rgba(0,0,0,0.8)');
+  gradient.addColorStop(0.8, 'rgba(0,0,0,0.3)');
+  gradient.addColorStop(1, 'rgba(0,0,0,0)');
+  dctx.fillStyle = gradient;
+  dctx.fillRect(0, 0, maskSize, maskSize);
+  dctx.globalCompositeOperation = 'source-over';
+  scene.textures.addCanvas('darkness_mask', darkCanvas);
 
   // -- Hourglass Ghost (沙漏形幽灵) --
   createGhostTexture(scene, 'ghost', 0xaa44ff);
@@ -438,10 +445,8 @@ class GameScene extends Phaser.Scene {
     this.cameras.main.setBounds(0, 0, this.levelWidth, this.levelHeight);
     this.physics.world.setBounds(0, 0, this.levelWidth, this.levelHeight);
 
-    // ---- Darkness overlay (RenderTexture approach) ----
-    this.darkRT = this.add.renderTexture(0, 0, this.cameras.main.width, this.cameras.main.height)
-      .setOrigin(0, 0).setDepth(15).setScrollFactor(0).setBlendMode(Phaser.BlendModes.MULTIPLY);
-    this.lightImage = this.add.image(0, 0, 'light_mask').setVisible(false);
+    // ---- Darkness overlay: a large dark sprite with a transparent hole, follows the player ----
+    this.darknessMask = this.add.image(0, 0, 'darkness_mask').setDepth(15).setScale(1);
     this.lightRadius = 120;
 
     // ---- Input ----
@@ -786,15 +791,17 @@ class GameScene extends Phaser.Scene {
   useVacuum(delta) {
     const px = this.player.x;
     const py = this.player.y;
-    const dir = this.facingRight ? 1 : -1;
 
-    // Show beam
-    this.vacuumBeam.setPosition(px + dir * 8, py);
-    this.vacuumBeam.setFlipX(!this.facingRight);
+    // Show beam - origin(0, 0.5) means it extends from left edge to right
+    // Facing right: place at player right side, scaleX positive
+    // Facing left: place at player left side, scaleX negative (mirrors it)
     this.vacuumBeam.setVisible(true);
-    if (!this.facingRight) {
-      this.vacuumBeam.setPosition(px - 8 - 200, py);
-      this.vacuumBeam.setFlipX(false);
+    if (this.facingRight) {
+      this.vacuumBeam.setPosition(px + 8, py);
+      this.vacuumBeam.setScale(1, 1);
+    } else {
+      this.vacuumBeam.setPosition(px - 8, py);
+      this.vacuumBeam.setScale(-1, 1);
     }
 
     // Increase light while using
@@ -837,13 +844,15 @@ class GameScene extends Phaser.Scene {
   useFlashlight() {
     const px = this.player.x;
     const py = this.player.y;
-    const dir = this.facingRight ? 1 : -1;
 
-    // Show beam
-    this.flashlightBeam.setPosition(px + dir * 8, py);
+    // Show beam - mirror with negative scaleX when facing left
     this.flashlightBeam.setVisible(true);
-    if (!this.facingRight) {
-      this.flashlightBeam.setPosition(px - 8 - 300, py);
+    if (this.facingRight) {
+      this.flashlightBeam.setPosition(px + 8, py);
+      this.flashlightBeam.setScale(1, 1);
+    } else {
+      this.flashlightBeam.setPosition(px - 8, py);
+      this.flashlightBeam.setScale(-1, 1);
     }
 
     this.lightRadius = 180;
@@ -987,30 +996,10 @@ class GameScene extends Phaser.Scene {
 
   // ---- Darkness / Lighting ----
   updateDarkness() {
-    const cam = this.cameras.main;
-    const w = cam.width;
-    const h = cam.height;
-
-    // Fill with dark color
-    this.darkRT.fill(0x050510);
-
-    // Player screen position
-    const px = this.player.x - cam.scrollX;
-    const py = this.player.y - cam.scrollY;
-
-    // Draw light mask centered on player using ERASE blend to punch a hole
-    const scale = (this.lightRadius / 256) * 1.8;
-    this.lightImage.setPosition(px, py).setScale(scale);
-    this.darkRT.erase(this.lightImage, px, py);
-
-    // If using flashlight or vacuum, add directional light
-    if (this.vacuumBeam.visible || this.flashlightBeam.visible) {
-      const dir = this.facingRight ? 1 : -1;
-      const extraX = px + dir * this.lightRadius * 0.8;
-      this.lightImage.setScale(scale * 0.6);
-      this.darkRT.erase(this.lightImage, extraX, py);
-      this.lightImage.setScale(scale); // reset
-    }
+    // Simply move the darkness mask to center on the player
+    // The mask is 2048x2048 with a transparent hole at center (origin 0.5, 0.5 by default)
+    const scale = this.lightRadius / 200; // 200 is the base lightR in the texture
+    this.darknessMask.setPosition(this.player.x, this.player.y).setScale(scale);
   }
 
   // ---- Win / Lose ----
