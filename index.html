@@ -47,8 +47,8 @@ class GameScene extends Phaser.Scene {
         // ---- Room / Environment ----
         this.createRoom();
 
-        // ---- Player ----
-        this.player = this.add.rectangle(GAME_W / 2, GAME_H / 2, 30, 30, 0x00cc44);
+        // ---- Player (invisible physics body) ----
+        this.player = this.add.rectangle(GAME_W / 2, GAME_H / 2, 28, 50, 0x000000, 0);
         this.player.setDepth(10);
         this.physics.add.existing(this.player);
         this.player.body.setCollideWorldBounds(true);
@@ -58,6 +58,12 @@ class GameScene extends Phaser.Scene {
         this.isVacuuming = false;
         this.vacuumTarget = null;
         this.lastDamageTime = 0;
+        this.playerDamageFlash = 0;
+        this.playerDead = false;
+
+        // ---- Player sprite (drawn with graphics) ----
+        this.playerGfx = this.add.graphics();
+        this.playerGfx.setDepth(10);
 
         // ---- Flashlight visuals ----
         this.flashlightGfx = this.add.graphics();
@@ -444,13 +450,10 @@ class GameScene extends Phaser.Scene {
                 if (distToPlayer < 35 && time - this.lastDamageTime > GHOST_DAMAGE_INTERVAL) {
                     this.playerHP--;
                     this.lastDamageTime = time;
-                    this.player.setFillStyle(0xff0000);
-                    this.time.delayedCall(200, () => {
-                        if (this.playerHP > 0) this.player.setFillStyle(0x00cc44);
-                    });
+                    this.playerDamageFlash = 200;
                     if (this.playerHP <= 0) {
                         this.showMessage('GAME OVER');
-                        this.player.setFillStyle(0x333333);
+                        this.playerDead = true;
                         this.player.body.setVelocity(0, 0);
                     }
                 }
@@ -604,7 +607,114 @@ class GameScene extends Phaser.Scene {
             }
         }
 
+        // ---- Draw player character ----
+        this.playerDamageFlash = Math.max(0, this.playerDamageFlash - delta);
+        this.drawPlayer();
+
         this.updateUI();
+    }
+
+    drawPlayer() {
+        const g = this.playerGfx;
+        g.clear();
+        const px = this.player.x;
+        const py = this.player.y;
+        const flash = this.playerDamageFlash > 0;
+        const dead = this.playerDead;
+
+        // Tint colors
+        const skinColor = dead ? 0x666666 : (flash ? 0xff4444 : 0xf5deb3);
+        const coatColor = dead ? 0x444444 : (flash ? 0xaa2222 : 0x2a5a2a);
+        const coatInner = dead ? 0x555555 : (flash ? 0xcc3333 : 0x3a7a3a);
+        const buttonColor = dead ? 0x333333 : (flash ? 0xff6666 : 0xd4a843);
+        const bootColor = dead ? 0x222222 : 0x1a1a1a;
+        const eyeWhite = 0xffffff;
+        const pupilColor = 0x111111;
+        const frameColor = dead ? 0x444444 : (flash ? 0xaa2222 : 0x333333);
+
+        // ---- Boots (two small rectangles at bottom) ----
+        g.fillStyle(bootColor, 1);
+        g.fillRect(px - 10, py + 16, 8, 10);  // left boot
+        g.fillRect(px + 2, py + 16, 8, 10);   // right boot
+
+        // ---- Long coat / changshan body ----
+        // Outer coat
+        g.fillStyle(coatColor, 1);
+        g.fillRoundedRect(px - 14, py - 14, 28, 34, 3);
+        // Inner lighter stripe
+        g.fillStyle(coatInner, 1);
+        g.fillRect(px - 2, py - 12, 4, 30);
+
+        // ---- Buttons down the center (6 small circles) ----
+        g.fillStyle(buttonColor, 1);
+        for (let i = 0; i < 6; i++) {
+            g.fillCircle(px, py - 10 + i * 5, 2);
+        }
+
+        // ---- Arms (thin lines with circular hands) ----
+        g.lineStyle(2, skinColor, 1);
+        // Left arm
+        g.beginPath();
+        g.moveTo(px - 14, py - 6);
+        g.lineTo(px - 24, py + 4);
+        g.strokePath();
+        g.fillStyle(skinColor, 1);
+        g.fillCircle(px - 24, py + 4, 3); // left hand
+
+        // Right arm
+        g.lineStyle(2, skinColor, 1);
+        g.beginPath();
+        g.moveTo(px + 14, py - 6);
+        g.lineTo(px + 24, py + 4);
+        g.strokePath();
+        g.fillStyle(skinColor, 1);
+        g.fillCircle(px + 24, py + 4, 3); // right hand
+
+        // ---- Neck ----
+        g.lineStyle(2, skinColor, 1);
+        g.beginPath();
+        g.moveTo(px, py - 14);
+        g.lineTo(px, py - 20);
+        g.strokePath();
+
+        // ---- Head (circle) ----
+        g.fillStyle(skinColor, 1);
+        g.fillCircle(px, py - 28, 12);
+        g.lineStyle(1.5, frameColor, 1);
+        g.strokeCircle(px, py - 28, 12);
+
+        // ---- Glasses / Eyes ----
+        // Left eye (circle frame)
+        g.lineStyle(1.5, frameColor, 1);
+        g.strokeCircle(px - 5, py - 30, 4.5);
+        g.fillStyle(eyeWhite, 1);
+        g.fillCircle(px - 5, py - 30, 4);
+        // Left pupil
+        g.fillStyle(pupilColor, 1);
+        g.fillCircle(px - 4, py - 30, 1.8);
+
+        // Right eye (circle frame)
+        g.lineStyle(1.5, frameColor, 1);
+        g.strokeCircle(px + 5, py - 30, 4.5);
+        g.fillStyle(eyeWhite, 1);
+        g.fillCircle(px + 5, py - 30, 4);
+        // Right pupil
+        g.fillStyle(pupilColor, 1);
+        g.fillCircle(px + 6, py - 30, 1.8);
+
+        // Bridge of glasses
+        g.lineStyle(1.5, frameColor, 1);
+        g.beginPath();
+        g.moveTo(px - 0.5, py - 30);
+        g.lineTo(px + 0.5, py - 30);
+        g.strokePath();
+
+        // ---- Mouth (small line) ----
+        g.lineStyle(1, frameColor, 0.7);
+        g.beginPath();
+        g.moveTo(px - 3, py - 23);
+        g.lineTo(px + 3, py - 23);
+        g.strokePath();
     }
 
     captureGhost(ghost, index) {
