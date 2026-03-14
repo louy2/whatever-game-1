@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Luigi's Mansion - Phaser 3</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+</head>
+<body>
+<script>
+// ============================================================
+// Luigi's Mansion - Phaser 3 Tribute
+// Single-file HTML5 game, mobile-first (iPad)
+// ============================================================
+
+const GAME_W = 1024;
+const GAME_H = 768;
+const PLAYER_SPEED = 200;
+const GHOST_SPEED = 120;
+const GHOST_FLEE_SPEED = 160;
+const FLASHLIGHT_RANGE = 280;
+const FLASHLIGHT_ANGLE = Math.PI / 3.5; // ~51 degrees
+const VACUUM_RANGE = 240;
+const STUN_DURATION = 2000;
+const GHOST_MAX_HP = 100;
+const PLAYER_MAX_HP = 5;
+const TOTAL_GHOSTS = 6;
+const JOYSTICK_RADIUS = 60;
+const JOYSTICK_BASE_RADIUS = 80;
+const TUG_DRAIN_RATE = 35; // HP/sec when pulling correctly
+const TUG_DRAIN_POOR = 8;  // HP/sec when not pulling well
+const GHOST_DAMAGE_INTERVAL = 1500;
+
+class GameScene extends Phaser.Scene {
+    constructor() {
+        super('GameScene');
+    }
+
+    create() {
+        this.cameras.main.setBackgroundColor('#1a1a2e');
+
+        // ---- Room / Environment ----
+        this.createRoom();
+
+        // ---- Player ----
+        this.player = this.add.rectangle(GAME_W / 2, GAME_H / 2, 30, 30, 0x00cc44);
+        this.player.setDepth(10);
+        this.physics.add.existing(this.player);
+        this.player.body.setCollideWorldBounds(true);
+        this.playerHP = PLAYER_MAX_HP;
+        this.playerAimAngle = 0;
+        this.isStunning = false;
+        this.isVacuuming = false;
+        this.vacuumTarget = null;
+        this.lastDamageTime = 0;
+
+        // ---- Flashlight visuals ----
+        this.flashlightGfx = this.add.graphics();
+        this.flashlightGfx.setDepth(5);
+
+        // ---- Darkness overlay with mask ----
+        this.darkOverlay = this.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0x000000, 0.82);
+        this.darkOverlay.setDepth(15);
+        this.lightMaskGfx = this.make.graphics({ x: 0, y: 0 });
+        this.lightMask = this.lightMaskGfx.createGeometryMask();
+        this.lightMask.invertAlpha = true;
+        this.darkOverlay.setMask(this.lightMask);
+
+        // ---- Vacuum link graphics ----
+        this.vacuumLinkGfx = this.add.graphics();
+        this.vacuumLinkGfx.setDepth(9);
+
+        // ---- Ghosts ----
+        this.ghosts = [];
+        this.ghostsCaptured = 0;
+        this.spawnGhosts(TOTAL_GHOSTS);
+
+        // ---- UI ----
+        this.createUI();
+
+        // ---- Virtual Controls ----
+        this.createVirtualControls();
+
+        // ---- Particle-like pop effect pool ----
+        this.popEffects = [];
+
+        // ---- Input: keyboard fallback ----
+        this.cursors = this.input.keyboard.createCursorKeys();
+        this.keyW = this.input.keyboard.addKey('W');
+        this.keyA = this.input.keyboard.addKey('A');
+        this.keyS = this.input.keyboard.addKey('S');
+        this.keyD = this.input.keyboard.addKey('D');
+        this.keySpace = this.input.keyboard.addKey('SPACE');
+        this.keyF = this.input.keyboard.addKey('F');
+
+        // ---- Furniture collision bodies ----
+        this.furnitureGroup = this.physics.add.staticGroup();
+        this.furnitureRects.forEach(r => {
+            const body = this.add.rectangle(r.x, r.y, r.w, r.h, 0x000000, 0);
+            this.physics.add.existing(body, true);
+            this.furnitureGroup.add(body);
+        });
+        this.physics.add.collider(this.player, this.furnitureGroup);
+    }
+
+    createRoom() {
+        // Floor
+        this.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W - 40, GAME_H - 40, 0x2a1a0e).setDepth(0);
+        // Walls
+        const wallColor = 0x3d2b1f;
+        this.add.rectangle(GAME_W / 2, 10, GAME_W, 20, wallColor).setDepth(1);
+        this.add.rectangle(GAME_W / 2, GAME_H - 10, GAME_W, 20, wallColor).setDepth(1);
+        this.add.rectangle(10, GAME_H / 2, 20, GAME_H, wallColor).setDepth(1);
+        this.add.rectangle(GAME_W - 10, GAME_H / 2, 20, GAME_H, wallColor).setDepth(1);
+
+        // Furniture (visual + collision)
+        this.furnitureRects = [];
+        const furnitureColor = 0x5c3a1e;
+        const placeFurniture = (x, y, w, h) => {
+            this.add.rectangle(x, y, w, h, furnitureColor).setDepth(2);
+            this.add.rectangle(x, y, w - 4, h - 4, 0x7a5230).setDepth(2);
+            this.furnitureRects.push({ x, y, w, h });
+        };
+        // Tables and cabinets
+        placeFurniture(150, 120, 100, 60);
+        placeFurniture(850, 120, 120, 50);
+        placeFurniture(120, 550, 60, 120);
+        placeFurniture(900, 600, 80, 80);
+        placeFurniture(500, 200, 70, 70);
+        placeFurniture(500, 580, 90, 50);
+        // Rug in center
+        this.add.ellipse(GAME_W / 2, GAME_H / 2, 200, 140, 0x6b2d5b, 0.3).setDepth(0);
+    }
+
+    spawnGhosts(count) {
+        for (let i = 0; i < count; i++) {
+            this.spawnOneGhost();
+        }
+    }
+
+    spawnOneGhost() {
+        const margin = 80;
+        let x, y;
+        // Ensure ghosts don't spawn on top of player
+        do {
+            x = Phaser.Math.Between(margin, GAME_W - margin);
+            y = Phaser.Math.Between(margin, GAME_H - margin);
+        } while (Phaser.Math.Distance.Between(x, y, this.player.x, this.player.y) < 200);
+
+        const ghost = this.add.circle(x, y, 18, 0x7744ff, 0.85);
+        ghost.setDepth(8);
+        this.physics.add.existing(ghost);
+        ghost.body.setCollideWorldBounds(true);
+        ghost.body.setBounce(1, 1);
+
+        // Ghost eyes
+        const eyeL = this.add.circle(-6, -6, 4, 0xffffff);
+        const eyeR = this.add.circle(6, -6, 4, 0xffffff);
+        const pupilL = this.add.circle(-6, -6, 2, 0x000000);
+        const pupilR = this.add.circle(6, -6, 2, 0x000000);
+        eyeL.setDepth(8); eyeR.setDepth(8);
+        pupilL.setDepth(8); pupilR.setDepth(8);
+        ghost.eyes = [eyeL, eyeR, pupilL, pupilR];
+
+        ghost.hp = GHOST_MAX_HP;
+        ghost.state = 'roaming'; // roaming, stunned, sucking, captured
+        ghost.stunTimer = 0;
+        ghost.moveAngle = Math.random() * Math.PI * 2;
+        ghost.changeTimer = Phaser.Math.Between(500, 2000);
+        ghost.fleeAngle = 0;
+        ghost.fleeChangeTimer = 0;
+
+        // HP bar background
+        ghost.hpBarBg = this.add.rectangle(x, y - 28, 36, 6, 0x333333);
+        ghost.hpBarBg.setDepth(8);
+        ghost.hpBar = this.add.rectangle(x, y - 28, 34, 4, 0xff3333);
+        ghost.hpBar.setDepth(8);
+
+        this.ghosts.push(ghost);
+    }
+
+    createUI() {
+        // Top-left: Player HP
+        this.hpText = this.add.text(20, 20, '', {
+            fontFamily: 'monospace', fontSize: '20px', color: '#ff4444'
+        }).setDepth(50).setScrollFactor(0);
+
+        // Top-right: Ghost counter
+        this.ghostText = this.add.text(GAME_W - 20, 20, '', {
+            fontFamily: 'monospace', fontSize: '20px', color: '#aaaaff'
+        }).setDepth(50).setScrollFactor(0).setOrigin(1, 0);
+
+        // Center message
+        this.centerMsg = this.add.text(GAME_W / 2, GAME_H / 2 - 60, '', {
+            fontFamily: 'monospace', fontSize: '32px', color: '#ffcc00',
+            stroke: '#000', strokeThickness: 4
+        }).setDepth(50).setOrigin(0.5).setScrollFactor(0).setAlpha(0);
+
+        this.updateUI();
+    }
+
+    createVirtualControls() {
+        const uiDepth = 100;
+        // ---- Left Joystick (Movement) ----
+        this.leftJoystickBase = this.add.circle(130, GAME_H - 140, JOYSTICK_BASE_RADIUS, 0xffffff, 0.15);
+        this.leftJoystickBase.setDepth(uiDepth).setScrollFactor(0);
+        this.leftJoystickThumb = this.add.circle(130, GAME_H - 140, 30, 0xffffff, 0.4);
+        this.leftJoystickThumb.setDepth(uiDepth + 1).setScrollFactor(0);
+        this.leftJoystick = { active: false, pointerId: null, baseX: 130, baseY: GAME_H - 140, dx: 0, dy: 0 };
+
+        // ---- Right Joystick (Aim) ----
+        this.rightJoystickBase = this.add.circle(GAME_W - 130, GAME_H - 140, JOYSTICK_BASE_RADIUS, 0xffffff, 0.15);
+        this.rightJoystickBase.setDepth(uiDepth).setScrollFactor(0);
+        this.rightJoystickThumb = this.add.circle(GAME_W - 130, GAME_H - 140, 30, 0xffffff, 0.4);
+        this.rightJoystickThumb.setDepth(uiDepth + 1).setScrollFactor(0);
+        this.rightJoystick = { active: false, pointerId: null, baseX: GAME_W - 130, baseY: GAME_H - 140, dx: 0, dy: 0 };
+
+        // ---- Stun Button ----
+        this.stunBtn = this.add.circle(GAME_W - 260, GAME_H - 90, 35, 0xffdd44, 0.35);
+        this.stunBtn.setDepth(uiDepth).setScrollFactor(0).setStrokeStyle(2, 0xffdd44, 0.7);
+        this.stunBtnLabel = this.add.text(GAME_W - 260, GAME_H - 90, 'STUN', {
+            fontFamily: 'monospace', fontSize: '13px', color: '#ffdd44'
+        }).setDepth(uiDepth + 1).setScrollFactor(0).setOrigin(0.5);
+        this.stunBtnDown = false;
+        this.stunBtnPointerId = null;
+
+        // ---- Vacuum Button ----
+        this.vacBtn = this.add.circle(GAME_W - 190, GAME_H - 190, 35, 0x44ddff, 0.35);
+        this.vacBtn.setDepth(uiDepth).setScrollFactor(0).setStrokeStyle(2, 0x44ddff, 0.7);
+        this.vacBtnLabel = this.add.text(GAME_W - 190, GAME_H - 190, 'VAC', {
+            fontFamily: 'monospace', fontSize: '13px', color: '#44ddff'
+        }).setDepth(uiDepth + 1).setScrollFactor(0).setOrigin(0.5);
+        this.vacBtnDown = false;
+        this.vacBtnPointerId = null;
+
+        // ---- Multi-touch handling ----
+        this.input.addPointer(3); // support up to 4 simultaneous touches
+
+        this.input.on('pointerdown', (pointer) => this.handlePointerDown(pointer));
+        this.input.on('pointermove', (pointer) => this.handlePointerMove(pointer));
+        this.input.on('pointerup', (pointer) => this.handlePointerUp(pointer));
+    }
+
+    handlePointerDown(pointer) {
+        const px = pointer.x;
+        const py = pointer.y;
+
+        // Check stun button
+        if (Phaser.Math.Distance.Between(px, py, this.stunBtn.x, this.stunBtn.y) < 45) {
+            this.stunBtnDown = true;
+            this.stunBtnPointerId = pointer.id;
+            this.stunBtn.setFillStyle(0xffdd44, 0.6);
+            return;
+        }
+        // Check vacuum button
+        if (Phaser.Math.Distance.Between(px, py, this.vacBtn.x, this.vacBtn.y) < 45) {
+            this.vacBtnDown = true;
+            this.vacBtnPointerId = pointer.id;
+            this.vacBtn.setFillStyle(0x44ddff, 0.6);
+            return;
+        }
+
+        // Left half -> left joystick
+        if (px < GAME_W / 2 && !this.leftJoystick.active) {
+            this.leftJoystick.active = true;
+            this.leftJoystick.pointerId = pointer.id;
+            this.leftJoystick.baseX = px;
+            this.leftJoystick.baseY = py;
+            this.leftJoystickBase.setPosition(px, py);
+            this.leftJoystickThumb.setPosition(px, py);
+        }
+        // Right half -> right joystick
+        else if (px >= GAME_W / 2 && !this.rightJoystick.active) {
+            // Only if not hitting a button
+            this.rightJoystick.active = true;
+            this.rightJoystick.pointerId = pointer.id;
+            this.rightJoystick.baseX = px;
+            this.rightJoystick.baseY = py;
+            this.rightJoystickBase.setPosition(px, py);
+            this.rightJoystickThumb.setPosition(px, py);
+        }
+    }
+
+    handlePointerMove(pointer) {
+        if (this.leftJoystick.active && pointer.id === this.leftJoystick.pointerId) {
+            const dx = pointer.x - this.leftJoystick.baseX;
+            const dy = pointer.y - this.leftJoystick.baseY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const clamped = Math.min(dist, JOYSTICK_RADIUS);
+            const angle = Math.atan2(dy, dx);
+            this.leftJoystick.dx = (clamped / JOYSTICK_RADIUS) * Math.cos(angle);
+            this.leftJoystick.dy = (clamped / JOYSTICK_RADIUS) * Math.sin(angle);
+            this.leftJoystickThumb.setPosition(
+                this.leftJoystick.baseX + Math.cos(angle) * clamped,
+                this.leftJoystick.baseY + Math.sin(angle) * clamped
+            );
+        }
+        if (this.rightJoystick.active && pointer.id === this.rightJoystick.pointerId) {
+            const dx = pointer.x - this.rightJoystick.baseX;
+            const dy = pointer.y - this.rightJoystick.baseY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const clamped = Math.min(dist, JOYSTICK_RADIUS);
+            const angle = Math.atan2(dy, dx);
+            this.rightJoystick.dx = (clamped / JOYSTICK_RADIUS) * Math.cos(angle);
+            this.rightJoystick.dy = (clamped / JOYSTICK_RADIUS) * Math.sin(angle);
+            this.rightJoystickThumb.setPosition(
+                this.rightJoystick.baseX + Math.cos(angle) * clamped,
+                this.rightJoystick.baseY + Math.sin(angle) * clamped
+            );
+            // Update aim angle
+            if (dist > 10) {
+                this.playerAimAngle = angle;
+            }
+        }
+    }
+
+    handlePointerUp(pointer) {
+        if (this.leftJoystick.active && pointer.id === this.leftJoystick.pointerId) {
+            this.leftJoystick.active = false;
+            this.leftJoystick.dx = 0;
+            this.leftJoystick.dy = 0;
+            this.leftJoystickThumb.setPosition(this.leftJoystick.baseX, this.leftJoystick.baseY);
+        }
+        if (this.rightJoystick.active && pointer.id === this.rightJoystick.pointerId) {
+            this.rightJoystick.active = false;
+            this.rightJoystick.dx = 0;
+            this.rightJoystick.dy = 0;
+            this.rightJoystickThumb.setPosition(this.rightJoystick.baseX, this.rightJoystick.baseY);
+        }
+        if (this.stunBtnPointerId === pointer.id) {
+            this.stunBtnDown = false;
+            this.stunBtnPointerId = null;
+            this.stunBtn.setFillStyle(0xffdd44, 0.35);
+        }
+        if (this.vacBtnPointerId === pointer.id) {
+            this.vacBtnDown = false;
+            this.vacBtnPointerId = null;
+            this.vacBtn.setFillStyle(0x44ddff, 0.35);
+        }
+    }
+
+    update(time, delta) {
+        if (this.playerHP <= 0 || this.ghostsCaptured >= TOTAL_GHOSTS) {
+            this.updateUI();
+            return;
+        }
+
+        const dt = delta / 1000;
+
+        // ---- Player Movement ----
+        let vx = 0, vy = 0;
+        // Keyboard
+        if (this.keyA.isDown || this.cursors.left.isDown) vx -= 1;
+        if (this.keyD.isDown || this.cursors.right.isDown) vx += 1;
+        if (this.keyW.isDown || this.cursors.up.isDown) vy -= 1;
+        if (this.keyS.isDown || this.cursors.down.isDown) vy += 1;
+        // Joystick overrides
+        if (this.leftJoystick.active) {
+            vx = this.leftJoystick.dx;
+            vy = this.leftJoystick.dy;
+        }
+        const mag = Math.sqrt(vx * vx + vy * vy);
+        if (mag > 0) {
+            this.player.body.setVelocity((vx / mag) * PLAYER_SPEED, (vy / mag) * PLAYER_SPEED);
+        } else {
+            this.player.body.setVelocity(0, 0);
+        }
+
+        // ---- Aim (keyboard: mouse or right joystick) ----
+        if (!this.rightJoystick.active) {
+            // Keyboard aim with mouse
+            const mp = this.input.activePointer;
+            if (mp && !this.leftJoystick.active) {
+                this.playerAimAngle = Math.atan2(mp.y - this.player.y, mp.x - this.player.x);
+            }
+        }
+
+        // ---- Stun/Vacuum from keyboard ----
+        this.isStunning = this.stunBtnDown || this.keyF.isDown;
+        this.isVacuuming = this.vacBtnDown || this.keySpace.isDown;
+
+        // ---- Flashlight Triangle ----
+        const fx = this.player.x;
+        const fy = this.player.y;
+        const fAngle = this.playerAimAngle;
+        const triP1x = fx + Math.cos(fAngle - FLASHLIGHT_ANGLE) * FLASHLIGHT_RANGE;
+        const triP1y = fy + Math.sin(fAngle - FLASHLIGHT_ANGLE) * FLASHLIGHT_RANGE;
+        const triP2x = fx + Math.cos(fAngle + FLASHLIGHT_ANGLE) * FLASHLIGHT_RANGE;
+        const triP2y = fy + Math.sin(fAngle + FLASHLIGHT_ANGLE) * FLASHLIGHT_RANGE;
+        this.flashlightTri = new Phaser.Geom.Triangle(fx, fy, triP1x, triP1y, triP2x, triP2y);
+
+        // Draw flashlight
+        this.flashlightGfx.clear();
+        this.flashlightGfx.fillStyle(0xffffaa, 0.12);
+        this.flashlightGfx.fillTriangle(fx, fy, triP1x, triP1y, triP2x, triP2y);
+        this.flashlightGfx.lineStyle(1, 0xffff88, 0.3);
+        this.flashlightGfx.strokeTriangle(fx, fy, triP1x, triP1y, triP2x, triP2y);
+
+        // Light mask
+        this.lightMaskGfx.clear();
+        this.lightMaskGfx.fillStyle(0xffffff);
+        this.lightMaskGfx.fillTriangle(fx, fy, triP1x, triP1y, triP2x, triP2y);
+        // Also add a small circle around the player so they can always see themselves
+        this.lightMaskGfx.fillCircle(fx, fy, 50);
+
+        // ---- Vacuum link ----
+        this.vacuumLinkGfx.clear();
+
+        // ---- Ghost Update ----
+        for (let i = this.ghosts.length - 1; i >= 0; i--) {
+            const ghost = this.ghosts[i];
+            if (ghost.state === 'captured') continue;
+
+            const gx = ghost.x;
+            const gy = ghost.y;
+            const distToPlayer = Phaser.Math.Distance.Between(gx, gy, fx, fy);
+            const inFlashlight = Phaser.Geom.Triangle.ContainsPoint(this.flashlightTri, new Phaser.Geom.Point(gx, gy));
+
+            // ---- State Machine ----
+            if (ghost.state === 'roaming') {
+                ghost.setFillStyle(0x7744ff, 0.85);
+                ghost.changeTimer -= delta;
+                if (ghost.changeTimer <= 0) {
+                    ghost.moveAngle = Math.random() * Math.PI * 2;
+                    ghost.changeTimer = Phaser.Math.Between(800, 2500);
+                }
+                // Move toward player occasionally
+                if (distToPlayer > 60) {
+                    const toPlayerAngle = Math.atan2(fy - gy, fx - gx);
+                    const blend = 0.3;
+                    const finalAngle = ghost.moveAngle * (1 - blend) + toPlayerAngle * blend;
+                    ghost.body.setVelocity(
+                        Math.cos(finalAngle) * GHOST_SPEED,
+                        Math.sin(finalAngle) * GHOST_SPEED
+                    );
+                }
+
+                // Damage player on contact
+                if (distToPlayer < 35 && time - this.lastDamageTime > GHOST_DAMAGE_INTERVAL) {
+                    this.playerHP--;
+                    this.lastDamageTime = time;
+                    this.player.setFillStyle(0xff0000);
+                    this.time.delayedCall(200, () => {
+                        if (this.playerHP > 0) this.player.setFillStyle(0x00cc44);
+                    });
+                    if (this.playerHP <= 0) {
+                        this.showMessage('GAME OVER');
+                        this.player.setFillStyle(0x333333);
+                        this.player.body.setVelocity(0, 0);
+                    }
+                }
+
+                // Stun check
+                if (this.isStunning && inFlashlight && distToPlayer < FLASHLIGHT_RANGE) {
+                    ghost.state = 'stunned';
+                    ghost.stunTimer = STUN_DURATION;
+                    ghost.body.setVelocity(0, 0);
+                }
+            }
+            else if (ghost.state === 'stunned') {
+                ghost.setFillStyle(0xffff00, 1);
+                ghost.body.setVelocity(0, 0);
+                ghost.stunTimer -= delta;
+
+                if (ghost.stunTimer <= 0) {
+                    ghost.state = 'roaming';
+                }
+
+                // Start vacuum suction
+                if (this.isVacuuming && distToPlayer < VACUUM_RANGE) {
+                    ghost.state = 'sucking';
+                    ghost.fleeAngle = Math.random() * Math.PI * 2;
+                    ghost.fleeChangeTimer = 800;
+                    this.vacuumTarget = ghost;
+                }
+            }
+            else if (ghost.state === 'sucking') {
+                ghost.setFillStyle(0xff8800, 1);
+
+                // Ghost tries to flee in random direction
+                ghost.fleeChangeTimer -= delta;
+                if (ghost.fleeChangeTimer <= 0) {
+                    ghost.fleeAngle = Math.random() * Math.PI * 2;
+                    ghost.fleeChangeTimer = Phaser.Math.Between(600, 1500);
+                }
+
+                ghost.body.setVelocity(
+                    Math.cos(ghost.fleeAngle) * GHOST_FLEE_SPEED,
+                    Math.sin(ghost.fleeAngle) * GHOST_FLEE_SPEED
+                );
+
+                // Draw vacuum link
+                this.vacuumLinkGfx.lineStyle(3, 0x44ddff, 0.7);
+                this.vacuumLinkGfx.beginPath();
+                this.vacuumLinkGfx.moveTo(fx, fy);
+                this.vacuumLinkGfx.lineTo(gx, gy);
+                this.vacuumLinkGfx.strokePath();
+                // Animated particles along the line
+                const particleCount = 4;
+                const phase = (time % 1000) / 1000;
+                for (let p = 0; p < particleCount; p++) {
+                    const t = ((phase + p / particleCount) % 1);
+                    const ppx = Phaser.Math.Linear(gx, fx, t);
+                    const ppy = Phaser.Math.Linear(gy, fy, t);
+                    this.vacuumLinkGfx.fillStyle(0x88eeff, 0.6);
+                    this.vacuumLinkGfx.fillCircle(ppx, ppy, 3);
+                }
+
+                // Tug-of-war: check if player is pulling opposite direction
+                if (this.isVacuuming) {
+                    // Player pull direction from left joystick
+                    let pullX = this.leftJoystick.dx;
+                    let pullY = this.leftJoystick.dy;
+                    // Also keyboard
+                    if (!this.leftJoystick.active) {
+                        if (this.keyA.isDown || this.cursors.left.isDown) pullX -= 1;
+                        if (this.keyD.isDown || this.cursors.right.isDown) pullX += 1;
+                        if (this.keyW.isDown || this.cursors.up.isDown) pullY -= 1;
+                        if (this.keyS.isDown || this.cursors.down.isDown) pullY += 1;
+                    }
+
+                    const pullMag = Math.sqrt(pullX * pullX + pullY * pullY);
+                    // Ghost flee direction
+                    const gfx = Math.cos(ghost.fleeAngle);
+                    const gfy = Math.sin(ghost.fleeAngle);
+
+                    let drainRate = TUG_DRAIN_POOR;
+                    if (pullMag > 0.3) {
+                        // Dot product to see if pulling opposite to ghost
+                        const dot = (pullX / pullMag) * gfx + (pullY / pullMag) * gfy;
+                        if (dot < -0.3) {
+                            drainRate = TUG_DRAIN_RATE;
+                            // Visual feedback: link turns green-ish
+                            this.vacuumLinkGfx.lineStyle(4, 0x44ff88, 0.9);
+                            this.vacuumLinkGfx.beginPath();
+                            this.vacuumLinkGfx.moveTo(fx, fy);
+                            this.vacuumLinkGfx.lineTo(gx, gy);
+                            this.vacuumLinkGfx.strokePath();
+                        }
+                    }
+
+                    ghost.hp -= drainRate * dt;
+                    ghost.hp = Math.max(0, ghost.hp);
+
+                    if (ghost.hp <= 0) {
+                        this.captureGhost(ghost, i);
+                        continue;
+                    }
+                } else {
+                    // Released vacuum - ghost escapes back to roaming
+                    ghost.state = 'roaming';
+                    ghost.hp = Math.min(ghost.hp + 20, GHOST_MAX_HP);
+                    this.vacuumTarget = null;
+                }
+
+                // If ghost gets too far, break the link
+                const suckDist = Phaser.Math.Distance.Between(gx, gy, fx, fy);
+                if (suckDist > VACUUM_RANGE * 1.8) {
+                    ghost.state = 'roaming';
+                    ghost.hp = Math.min(ghost.hp + 10, GHOST_MAX_HP);
+                    this.vacuumTarget = null;
+                }
+            }
+
+            // Update ghost eye positions
+            if (ghost.eyes && ghost.state !== 'captured') {
+                const eyeOffX = Math.cos(this.playerAimAngle) * 2;
+                const eyeOffY = Math.sin(this.playerAimAngle) * 2;
+                ghost.eyes[0].setPosition(gx - 6, gy - 6);
+                ghost.eyes[1].setPosition(gx + 6, gy - 6);
+                ghost.eyes[2].setPosition(gx - 6 + eyeOffX, gy - 6 + eyeOffY);
+                ghost.eyes[3].setPosition(gx + 6 + eyeOffX, gy - 6 + eyeOffY);
+            }
+
+            // Update HP bar
+            if (ghost.hpBarBg && ghost.state !== 'captured') {
+                ghost.hpBarBg.setPosition(gx, gy - 28);
+                ghost.hpBar.setPosition(gx - 17 + (34 * (ghost.hp / GHOST_MAX_HP)) / 2, gy - 28);
+                ghost.hpBar.width = 34 * (ghost.hp / GHOST_MAX_HP);
+                ghost.hpBarBg.setVisible(ghost.state === 'sucking' || ghost.hp < GHOST_MAX_HP);
+                ghost.hpBar.setVisible(ghost.state === 'sucking' || ghost.hp < GHOST_MAX_HP);
+            }
+        }
+
+        // ---- Pop effects ----
+        for (let i = this.popEffects.length - 1; i >= 0; i--) {
+            const pop = this.popEffects[i];
+            pop.life -= dt;
+            if (pop.life <= 0) {
+                pop.parts.forEach(p => p.destroy());
+                this.popEffects.splice(i, 1);
+            } else {
+                pop.parts.forEach((p, idx) => {
+                    p.x += pop.vels[idx].x * dt;
+                    p.y += pop.vels[idx].y * dt;
+                    p.setAlpha(pop.life / pop.maxLife);
+                    p.setScale(pop.life / pop.maxLife);
+                });
+            }
+        }
+
+        this.updateUI();
+    }
+
+    captureGhost(ghost, index) {
+        ghost.state = 'captured';
+        ghost.body.setVelocity(0, 0);
+        ghost.setVisible(false);
+        ghost.eyes.forEach(e => e.setVisible(false));
+        ghost.hpBarBg.setVisible(false);
+        ghost.hpBar.setVisible(false);
+        this.vacuumTarget = null;
+        this.ghostsCaptured++;
+
+        // Pop effect
+        this.createPopEffect(ghost.x, ghost.y);
+
+        if (this.ghostsCaptured >= TOTAL_GHOSTS) {
+            this.showMessage('YOU WIN!');
+        }
+    }
+
+    createPopEffect(x, y) {
+        const parts = [];
+        const vels = [];
+        const colors = [0xffff00, 0xff8800, 0xff44ff, 0x44ff88, 0xffffff];
+        for (let i = 0; i < 10; i++) {
+            const angle = (Math.PI * 2 * i) / 10;
+            const speed = Phaser.Math.Between(100, 250);
+            const size = Phaser.Math.Between(3, 7);
+            const color = Phaser.Utils.Array.GetRandom(colors);
+            const part = this.add.circle(x, y, size, color);
+            part.setDepth(20);
+            parts.push(part);
+            vels.push({ x: Math.cos(angle) * speed, y: Math.sin(angle) * speed });
+        }
+        this.popEffects.push({ parts, vels, life: 0.6, maxLife: 0.6 });
+    }
+
+    showMessage(text) {
+        this.centerMsg.setText(text);
+        this.centerMsg.setAlpha(1);
+    }
+
+    updateUI() {
+        let hearts = '';
+        for (let i = 0; i < PLAYER_MAX_HP; i++) {
+            hearts += i < this.playerHP ? '\u2665 ' : '\u2661 ';
+        }
+        this.hpText.setText('HP: ' + hearts);
+        this.ghostText.setText('Ghosts: ' + this.ghostsCaptured + ' / ' + TOTAL_GHOSTS);
+    }
+}
+
+// ---- Phaser Config ----
+const config = {
+    type: Phaser.AUTO,
+    width: GAME_W,
+    height: GAME_H,
+    backgroundColor: '#000000',
+    parent: document.body,
+    scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH
+    },
+    physics: {
+        default: 'arcade',
+        arcade: {
+            gravity: { y: 0 },
+            debug: false
+        }
+    },
+    scene: [GameScene],
+    input: {
+        activePointers: 4
+    }
+};
+
+const game = new Phaser.Game(config);
+</script>
+</body>
+</html>
